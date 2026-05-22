@@ -1,0 +1,756 @@
+openapi: 3.1.0
+info:
+  title: Government Lead CRM API
+  description: |
+    Phase 1 API contract for the Government Lead screening module.
+    Covers authentication, agency master smart search, lead CRUD,
+    contact management, and the append-only audit log.
+
+    Conventions:
+      * All timestamps are ISO 8601 UTC.
+      * All monetary amounts are integer THB (no decimals).
+      * IDs are UUID v4 unless noted.
+      * Soft-deleted resources are excluded from list/detail unless `include_deleted=true`.
+      * Validation errors return 422 with `details` keyed by field name.
+  version: 1.0.0
+
+servers:
+  - url: https://crm.company.local/api/v1
+    description: Production
+  - url: https://crm-staging.company.local/api/v1
+    description: Staging
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Auth
+  - name: Me
+  - name: Agencies
+  - name: AgencySuggestions
+  - name: Leads
+  - name: Contacts
+  - name: Audit
+
+paths:
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Exchange credentials for an access token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, format: password, minLength: 8 }
+      responses:
+        '200':
+          description: Login success
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  access_token: { type: string }
+                  refresh_token: { type: string }
+                  expires_in: { type: integer, example: 3600 }
+                  user: { $ref: '#/components/schemas/User' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Refresh an expired access token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token: { type: string }
+      responses:
+        '200':
+          description: Refreshed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  access_token: { type: string }
+                  expires_in: { type: integer }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /me:
+    get:
+      tags: [Me]
+      summary: Get the current user
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+    patch:
+      tags: [Me]
+      summary: Update profile fields
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                display_name: { type: string, maxLength: 80 }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+
+  /me/line/link:
+    post:
+      tags: [Me]
+      summary: Link the LINE account using a one-time ID token from LINE Login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [line_id_token]
+              properties:
+                line_id_token: { type: string }
+      responses:
+        '204': { description: Linked }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /me/line/unlink:
+    post:
+      tags: [Me]
+      summary: Unlink the LINE account
+      responses:
+        '204': { description: Unlinked }
+
+  /agencies/search:
+    get:
+      tags: [Agencies]
+      summary: Smart search across agency master data
+      description: |
+        Returns up to `limit` ranked matches. Ranking signals:
+        exact-match boost, frequency-in-past-leads, recency of last lead,
+        and trigram similarity.
+      parameters:
+        - in: query
+          name: q
+          required: true
+          schema: { type: string, minLength: 2, maxLength: 80 }
+          description: Partial query in Thai or English
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 20, default: 8 }
+        - in: query
+          name: ministry_id
+          schema: { type: string, format: uuid }
+          description: Narrow results to a parent ministry
+      responses:
+        '200':
+          description: Ranked matches
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items: { $ref: '#/components/schemas/AgencySearchHit' }
+                  took_ms: { type: integer }
+
+  /agencies/{id}:
+    get:
+      tags: [Agencies]
+      summary: Get full agency record by id
+      parameters:
+        - $ref: '#/components/parameters/UUIDPath'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Agency' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /agencies/suggest:
+    post:
+      tags: [Agencies]
+      summary: Sales suggests a new agency to be added to master data
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [suggested_name]
+              properties:
+                suggested_name: { type: string, minLength: 4, maxLength: 200 }
+                evidence_url: { type: string, format: uri }
+                note: { type: string, maxLength: 500 }
+      responses:
+        '201':
+          description: Suggestion queued for admin review
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AgencySuggestion' }
+
+  /agency-suggestions:
+    get:
+      tags: [AgencySuggestions]
+      summary: List agency suggestions (admin only)
+      parameters:
+        - in: query
+          name: status
+          schema: { type: string, enum: [pending, approved, rejected] }
+        - in: query
+          name: page
+          schema: { type: integer, default: 1 }
+        - in: query
+          name: page_size
+          schema: { type: integer, default: 25, maximum: 100 }
+      responses:
+        '200':
+          description: Paginated list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/AgencySuggestion' }
+                  meta: { $ref: '#/components/schemas/PaginationMeta' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /agency-suggestions/{id}/approve:
+    post:
+      tags: [AgencySuggestions]
+      summary: Approve a suggestion and create the agency record
+      parameters:
+        - $ref: '#/components/parameters/UUIDPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [agency]
+              properties:
+                agency: { $ref: '#/components/schemas/AgencyInput' }
+      responses:
+        '200':
+          description: Agency created, suggestion closed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Agency' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /agency-suggestions/{id}/reject:
+    post:
+      tags: [AgencySuggestions]
+      summary: Reject a suggestion
+      parameters:
+        - $ref: '#/components/parameters/UUIDPath'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string, maxLength: 500 }
+      responses:
+        '204': { description: Rejected }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /leads:
+    get:
+      tags: [Leads]
+      summary: List leads visible to the current user
+      parameters:
+        - in: query
+          name: status
+          schema: { $ref: '#/components/schemas/LeadStatus' }
+        - in: query
+          name: owner_id
+          schema: { type: string, format: uuid }
+        - in: query
+          name: agency_id
+          schema: { type: string, format: uuid }
+        - in: query
+          name: q
+          schema: { type: string }
+          description: Free-text search across project name and agency name
+        - in: query
+          name: from
+          schema: { type: string, format: date }
+        - in: query
+          name: to
+          schema: { type: string, format: date }
+        - in: query
+          name: include_deleted
+          schema: { type: boolean, default: false }
+        - in: query
+          name: page
+          schema: { type: integer, default: 1 }
+        - in: query
+          name: page_size
+          schema: { type: integer, default: 25, maximum: 100 }
+        - in: query
+          name: sort
+          schema:
+            type: string
+            enum: [created_at, -created_at, submission_date, -submission_date, budget_thb, -budget_thb]
+            default: -created_at
+      responses:
+        '200':
+          description: Paginated leads
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/LeadSummary' }
+                  meta: { $ref: '#/components/schemas/PaginationMeta' }
+    post:
+      tags: [Leads]
+      summary: Create a new lead in draft status
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LeadInput' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Lead' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /leads/{id}:
+    get:
+      tags: [Leads]
+      summary: Get lead detail
+      parameters:
+        - $ref: '#/components/parameters/UUIDPath'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Lead' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Leads]
+      summary: Partial update of a lead
+      parameters:
+        - $ref: '#/components/parameters/UUIDPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LeadPatch' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Lead' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+    delete:
+      tags: [Leads]
+      summary: Soft delete a lead (sets deleted_at)
+      parameters:
+        - $ref: '#/components/parameters/UUIDPath'
+      responses:
+        '204': { description: Deleted }
+
+  /leads/{id}/restore:
+    post:
+      tags: [Leads]
+      summary: Restore a soft-deleted lead (admin only)
+      parameters:
+        - $ref: '#/components/parameters/UUIDPath'
+      responses:
+        '200':
+          description: Restored
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Lead' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /leads/{id}/qualify:
+    post:
+      tags: [Leads]
+      summary: Manually mark a lead as Qualified (Phase 1 fallback before Risk Engine)
+      description: |
+        Returns 422 if any of the six required fields are missing:
+        agency_id, project_name, budget_thb, submission_date,
+        customer_control, primary_contact.
+      parameters:
+        - $ref: '#/components/parameters/UUIDPath'
+      responses:
+        '200':
+          description: Qualified
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Lead' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /leads/{id}/audit:
+    get:
+      tags: [Audit]
+      summary: Get the audit history for a lead
+      parameters:
+        - $ref: '#/components/parameters/UUIDPath'
+        - in: query
+          name: page
+          schema: { type: integer, default: 1 }
+        - in: query
+          name: page_size
+          schema: { type: integer, default: 50, maximum: 200 }
+      responses:
+        '200':
+          description: Audit entries newest-first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/AuditEntry' }
+                  meta: { $ref: '#/components/schemas/PaginationMeta' }
+
+  /leads/{id}/contacts:
+    post:
+      tags: [Contacts]
+      summary: Add a contact point to a lead
+      parameters:
+        - $ref: '#/components/parameters/UUIDPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ContactInput' }
+      responses:
+        '201':
+          description: Added
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Contact' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /leads/{leadId}/contacts/{contactId}:
+    patch:
+      tags: [Contacts]
+      summary: Update a contact
+      parameters:
+        - in: path
+          name: leadId
+          required: true
+          schema: { type: string, format: uuid }
+        - in: path
+          name: contactId
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ContactInput' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Contact' }
+    delete:
+      tags: [Contacts]
+      summary: Remove a contact
+      parameters:
+        - in: path
+          name: leadId
+          required: true
+          schema: { type: string, format: uuid }
+        - in: path
+          name: contactId
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204': { description: Deleted }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    UUIDPath:
+      in: path
+      name: id
+      required: true
+      schema: { type: string, format: uuid }
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid credentials
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Forbidden:
+      description: Authenticated but lacks permission
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    UnprocessableEntity:
+      description: Validation failed
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  schemas:
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string, example: VALIDATION_FAILED }
+        message: { type: string, example: One or more fields are invalid }
+        details:
+          type: object
+          additionalProperties: true
+          example:
+            project_name: must be at least 10 characters
+            budget_thb: must be greater than 0
+
+    PaginationMeta:
+      type: object
+      properties:
+        page: { type: integer }
+        page_size: { type: integer }
+        total: { type: integer }
+        total_pages: { type: integer }
+
+    User:
+      type: object
+      required: [id, email, display_name, role]
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        display_name: { type: string }
+        role:
+          type: string
+          enum: [sales, manager, admin, auditor]
+        line_linked: { type: boolean }
+        line_display_name: { type: string, nullable: true }
+        is_active: { type: boolean }
+        created_at: { type: string, format: date-time }
+
+    AgencyType:
+      type: string
+      enum: [ministry, department, state_enterprise, local_admin, university, other]
+
+    Agency:
+      type: object
+      required: [id, official_name_th, agency_type, status]
+      properties:
+        id: { type: string, format: uuid }
+        official_name_th: { type: string }
+        official_name_en: { type: string, nullable: true }
+        short_name: { type: string, nullable: true }
+        tax_id: { type: string, nullable: true }
+        gfmis_code: { type: string, nullable: true }
+        agency_type: { $ref: '#/components/schemas/AgencyType' }
+        parent_agency_id: { type: string, format: uuid, nullable: true }
+        ministry_name: { type: string, nullable: true }
+        province: { type: string, nullable: true }
+        default_address: { type: string, nullable: true }
+        status:
+          type: string
+          enum: [active, deprecated]
+        past_leads_count: { type: integer }
+        past_leads_won: { type: integer }
+
+    AgencyInput:
+      type: object
+      required: [official_name_th, agency_type]
+      properties:
+        official_name_th: { type: string }
+        official_name_en: { type: string }
+        short_name: { type: string }
+        tax_id: { type: string }
+        gfmis_code: { type: string }
+        agency_type: { $ref: '#/components/schemas/AgencyType' }
+        parent_agency_id: { type: string, format: uuid }
+        province: { type: string }
+        default_address: { type: string }
+        aliases:
+          type: array
+          items: { type: string }
+
+    AgencySearchHit:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        official_name_th: { type: string }
+        ministry_name: { type: string, nullable: true }
+        agency_type: { $ref: '#/components/schemas/AgencyType' }
+        tax_id: { type: string, nullable: true }
+        past_leads_count: { type: integer }
+        match_highlights:
+          type: array
+          items:
+            type: object
+            properties:
+              field: { type: string }
+              snippet: { type: string }
+
+    AgencySuggestion:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        suggested_name: { type: string }
+        evidence_url: { type: string, format: uri, nullable: true }
+        note: { type: string, nullable: true }
+        status:
+          type: string
+          enum: [pending, approved, rejected]
+        suggested_by: { $ref: '#/components/schemas/User' }
+        reviewed_by:
+          allOf:
+            - $ref: '#/components/schemas/User'
+          nullable: true
+        review_reason: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+        reviewed_at: { type: string, format: date-time, nullable: true }
+
+    CustomerControl:
+      type: string
+      enum: [no_contact, know_contact, reach_user, reach_decision_maker]
+
+    LeadStatus:
+      type: string
+      enum: [draft, qualified, pending_review, blocked, converted, lost]
+
+    LeadSummary:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        lead_code: { type: string, example: LD-2026-0421 }
+        project_name: { type: string }
+        agency:
+          type: object
+          properties:
+            id: { type: string, format: uuid }
+            official_name_th: { type: string }
+        budget_thb: { type: integer, format: int64 }
+        submission_date: { type: string, format: date, nullable: true }
+        status: { $ref: '#/components/schemas/LeadStatus' }
+        owner: { $ref: '#/components/schemas/User' }
+        created_at: { type: string, format: date-time }
+
+    Lead:
+      allOf:
+        - $ref: '#/components/schemas/LeadSummary'
+        - type: object
+          properties:
+            agency: { $ref: '#/components/schemas/Agency' }
+            customer_control: { $ref: '#/components/schemas/CustomerControl' }
+            contacts:
+              type: array
+              items: { $ref: '#/components/schemas/Contact' }
+            updated_at: { type: string, format: date-time }
+            deleted_at: { type: string, format: date-time, nullable: true }
+
+    LeadInput:
+      type: object
+      required: [agency_id, project_name, budget_thb, submission_date, customer_control, primary_contact]
+      properties:
+        agency_id: { type: string, format: uuid }
+        project_name: { type: string, minLength: 10, maxLength: 200 }
+        budget_thb: { type: integer, format: int64, minimum: 1 }
+        submission_date: { type: string, format: date }
+        customer_control: { $ref: '#/components/schemas/CustomerControl' }
+        primary_contact: { $ref: '#/components/schemas/ContactInput' }
+
+    LeadPatch:
+      type: object
+      properties:
+        project_name: { type: string, minLength: 10, maxLength: 200 }
+        budget_thb: { type: integer, format: int64, minimum: 1 }
+        submission_date: { type: string, format: date }
+        customer_control: { $ref: '#/components/schemas/CustomerControl' }
+
+    Contact:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        lead_id: { type: string, format: uuid }
+        name: { type: string }
+        role_title: { type: string, nullable: true }
+        email: { type: string, format: email, nullable: true }
+        mobile: { type: string, nullable: true }
+        is_primary: { type: boolean }
+        created_at: { type: string, format: date-time }
+
+    ContactInput:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, minLength: 2, maxLength: 120 }
+        role_title: { type: string, maxLength: 120 }
+        email: { type: string, format: email }
+        mobile:
+          type: string
+          pattern: '^[0-9+\-\s()]{6,20}$'
+        is_primary: { type: boolean, default: false }
+
+    AuditEntry:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        entity_type:
+          type: string
+          enum: [lead, agency, contact, user, agency_suggestion, settings]
+        entity_id: { type: string, format: uuid }
+        action:
+          type: string
+          enum: [created, updated, deleted, status_changed, contact_added, contact_removed, qualified, restored]
+        actor: { $ref: '#/components/schemas/User' }
+        field_name: { type: string, nullable: true }
+        before_value:
+          type: object
+          nullable: true
+          additionalProperties: true
+        after_value:
+          type: object
+          nullable: true
+          additionalProperties: true
+        description: { type: string }
+        occurred_at: { type: string, format: date-time }
+        ip_address: { type: string, nullable: true }
