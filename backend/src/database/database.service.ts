@@ -41,6 +41,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       user: this.config.get<string>('DATABASE_USER', 'crm_app'),
       password: this.config.get<string>('DATABASE_PASSWORD', 'devpassword'),
       max: this.config.get<number>('DATABASE_POOL_MAX', 10),
+      ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
     });
 
     this.pool.on('error', (err) => {
