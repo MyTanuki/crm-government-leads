@@ -26,7 +26,7 @@ Four major subsystems being designed in sequence:
 | System 1 Phase 1 — Lead form + Smart Search + Audit foundation | ✅ Design complete |
 | System 1 Phase 1 — **Database layer** | ✅ Built and tested (13 migrations, 11/11 invariant tests pass) |
 | System 1 Phase 1 — **Backend API** | ✅ Built and tested (NestJS, 18 routes, 12/12 smoke tests pass) |
-| System 1 Phase 1 — Frontend | ⚪ Not started |
+| System 1 Phase 1 — **Frontend** | ✅ Built (Next.js 14, 6 pages, build passes) |
 | System 1 Phase 2 — Risk Engine + Tier Approval + Static Baseline | 🟡 High-level designed, UI not detailed |
 | System 1 Phase 3 — LINE OA Integration | 🟡 Architecture decided, Flex templates not designed |
 | System 1 Phase 4 — Calibration dashboard | ⚪ Not started |
